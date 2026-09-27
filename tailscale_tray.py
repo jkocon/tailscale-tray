@@ -89,6 +89,15 @@ def set_prefs(**prefs) -> None:
     api("PATCH", "prefs", body)
 
 
+def idle_once(func, *args) -> None:
+    """Wywołaj func raz w wątku GTK. Samo GLib.idle_add powtarza wywołanie, dopóki funkcja zwraca
+    True - z webbrowser.open (zwraca True) otwierało to przeglądarkę w pętli i położyło sesję."""
+    def _call() -> bool:
+        func(*args)
+        return False
+    GLib.idle_add(_call)
+
+
 def run(*cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
@@ -491,15 +500,17 @@ class TailscaleTray:
 
     def _watch_login(self, proc: subprocess.Popen) -> None:
         output = []
+        opened = False
         for line in proc.stdout:
             output.append(line)
             m = re.search(r"https://login\S+", line)
-            if m:
-                GLib.idle_add(webbrowser.open, m.group(0))
+            if m and not opened:
+                opened = True  # przeglądarka tylko raz na logowanie
+                idle_once(webbrowser.open, m.group(0))
         proc.wait()
         if proc.returncode not in (0, 126):
-            GLib.idle_add(error, "Login failed:\n" + "".join(output[-10:]).strip())
-        GLib.idle_add(self.force_refresh)
+            idle_once(error, "Login failed:\n" + "".join(output[-10:]).strip())
+        idle_once(self.force_refresh)
 
     def force_refresh(self) -> bool:
         self.signature = None
