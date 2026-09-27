@@ -467,10 +467,27 @@ class TailscaleTray:
             self.apply(**DEFAULT_PREFS)
 
     def switch_account(self, profile_id: str) -> None:
-        res = tailscale_admin("switch", profile_id)
-        if res.returncode != 0:
-            if res.returncode != 126:  # 126 = anulowane okno pkexec
-                error(f"Could not switch account:\n{(res.stderr or res.stdout).strip()}")
+        # Każdy profil pamięta własne WantRunning; jak w kliencie na Windows połączenie ma przejść
+        # na nowe konto. 'tailscale switch' kończy się kodem 1 ("Tailscale is stopped"), gdy docelowy
+        # profil był rozłączony, więc o powodzeniu decyduje aktywny profil, nie kod wyjścia.
+        was_connected = self.connected
+        res = None
+        try:
+            api("POST", f"profiles/{profile_id}")
+        except LocalAPIError:
+            res = tailscale_admin("switch", profile_id)  # np. bieżący profil bez operatora
+        try:
+            switched = (api("GET", "profiles/current") or {}).get("ID") == profile_id
+        except LocalAPIError:
+            switched = False
+        if switched and was_connected:
+            try:
+                set_prefs(WantRunning=True)
+            except LocalAPIError as e:
+                error(f"Switched account, but could not connect:\n{e}")
+        elif not switched and not (res and res.returncode == 126):  # 126 = anulowane okno pkexec
+            detail = (res.stderr or res.stdout).strip() if res else "tailscaled refused the switch"
+            error(f"Could not switch account:\n{detail}")
         self.signature = None
         self.refresh()
 
