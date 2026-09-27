@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tailscale Tray
+Comment=Tailscale status and settings in the system tray
+Exec=/usr/bin/python3 /usr/local/lib/tailscale-tray/tailscale_tray.py
+Icon=tailscale-tray
+Terminal=false
+NoDisplay=true
+X-KDE-autostart-phase=2

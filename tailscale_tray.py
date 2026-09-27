@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""Prosta ikona Tailscale w zasobniku w stylu klienta na Windows (zamiast rozbudowanego KTailctl).
+
+Menu (lewy lub prawy klik): status (klik = połącz/rozłącz), zalogowany użytkownik, to urządzenie,
+lista urządzeń w sieci, exit nody, ustawienia, About, Exit.
+
+Rozmawia z tailscaled przez jego LocalAPI (unix socket). Zmiana ustawień bez roota wymaga,
+żeby użytkownik był operatorem Tailscale: sudo tailscale set --operator=$USER (robi to install.sh).
+AppIndicator zamiast QSystemTrayIcon, bo w Plasmie tylko wtedy lewy klik otwiera menu.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import http.client
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import threading
+import webbrowser
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import AyatanaAppIndicator3 as AppIndicator3  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+APP_NAME = "Tailscale Tray"
+APP_VERSION = "1.0"
+SOCKET = "/var/run/tailscale/tailscaled.sock"
+POLL_SECONDS = 3
+ADMIN_URL = "https://login.tailscale.com/admin/machines"
+ICON_DIR = Path(__file__).resolve().with_name("icons")
+ICON_ON, ICON_OFF, ICON_EXIT = "tailscale-tray-on", "tailscale-tray-off", "tailscale-tray-exit"
+
+# Wartości domyślne Tailscale na Linuksie (tailscale up bez flag).
+DEFAULT_PREFS = {
+    "ShieldsUp": False,
+    "CorpDNS": True,
+    "RouteAll": False,
+    "ExitNodeID": "",
+    "ExitNodeIP": "",
+    "ExitNodeAllowLANAccess": False,
+}
+
+
+class LocalAPIError(Exception):
+    pass
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(5)
+        self.sock.connect(SOCKET)
+
+
+def api(method: str, path: str, body: dict | None = None):
+    try:
+        conn = _UnixHTTPConnection("local-tailscaled.sock", timeout=5)
+        conn.request(
+            method,
+            f"/localapi/v0/{path}",
+            body=json.dumps(body) if body is not None else None,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+    except OSError as e:
+        raise LocalAPIError(f"tailscaled nie odpowiada: {e}") from e
+    if resp.status >= 400:
+        raise LocalAPIError(data.decode(errors="replace").strip() or f"HTTP {resp.status}")
+    return json.loads(data) if data else None
+
+
+def set_prefs(**prefs) -> None:
+    """PATCH prefs; każde pole wymaga flagi <Pole>Set, inaczej tailscaled je ignoruje."""
+    body = dict(prefs)
+    for key in prefs:
+        if key == "AutoUpdate":
+            body["AutoUpdateSet"] = {"ApplySet": True}
+        else:
+            body[f"{key}Set"] = True
+    api("PATCH", "prefs", body)
+
+
+def run(*cmd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+
+def notify(title: str, body: str = "") -> None:
+    subprocess.Popen(["notify-send", "-a", APP_NAME, "-i", "tailscale-tray", title, body])
+
+
+def error(msg: str) -> None:
+    subprocess.Popen(["kdialog", "--title", APP_NAME, "--error", msg])
+
+
+def copy_to_clipboard(text: str) -> None:
+    # Na Waylandzie proces bez okna nie ustawi schowka przez GTK - wl-copy tak.
+    if shutil.which("wl-copy") and os.environ.get("WAYLAND_DISPLAY"):
+        subprocess.run(["wl-copy", text], timeout=5)
+    else:
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        cb.set_text(text, -1)
+        cb.store()
+    notify("Copied to clipboard", text)
+
+
+def auto_update_supported() -> bool:
+    try:
+        res = run("tailscale", "update", "--dry-run")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "not supported" not in (res.stdout + res.stderr)
+
+
+def unattended_enabled() -> bool:
+    # "Run unattended" na Linuksie = tailscaled startuje z systemem, bez logowania użytkownika.
+    return run("systemctl", "is-enabled", "tailscaled").stdout.strip() == "enabled"
+
+
+def first_ip(node: dict) -> str:
+    ips = node.get("TailscaleIPs") or []
+    v4 = [ip for ip in ips if ":" not in ip]
+    return (v4 or ips or ["-"])[0]
+
+
+def node_name(node: dict) -> str:
+    dns = (node.get("DNSName") or "").split(".")[0]
+    return dns or node.get("HostName") or "?"
+
+
+class TailscaleTray:
+    def __init__(self) -> None:
+        self.status: dict | None = None
+        self.prefs: dict | None = None
+        self.error: str = ""
+        self.unattended = unattended_enabled()
+        self.auto_update_ok = auto_update_supported()
+        self.signature = None
+        self.updating = False  # blokuje sygnały 'toggled' przy programowym ustawianiu pozycji
+        self.login_proc: subprocess.Popen | None = None
+
+        self.indicator = AppIndicator3.Indicator.new(
+            "tailscale-tray", ICON_OFF, AppIndicator3.IndicatorCategory.SYSTEM_SERVICES
+        )
+        if ICON_DIR.is_dir():
+            self.indicator.set_icon_theme_path(str(ICON_DIR))
+        self.indicator.set_title("Tailscale")
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self.refresh()
+        GLib.timeout_add_seconds(POLL_SECONDS, self.refresh)
+
+    # ---------- stan ----------
+
+    def refresh(self) -> bool:
+        try:
+            self.status = api("GET", "status")
+            self.prefs = api("GET", "prefs")
+            self.error = ""
+        except LocalAPIError as e:
+            self.status, self.prefs, self.error = None, None, str(e)
+        sig = self.make_signature()
+        if sig != self.signature:
+            self.signature = sig
+            self.update_icon()
+            self.indicator.set_menu(self.build_menu())
+        return True
+
+    def make_signature(self):
+        s, p = self.status or {}, self.prefs or {}
+        peers = tuple(
+            sorted(
+                (node_name(n), first_ip(n), n.get("Online"), n.get("ExitNodeOption"), n.get("ExitNode"), n.get("OS"))
+                for n in (s.get("Peer") or {}).values()
+            )
+        )
+        me = s.get("Self") or {}
+        keys = ("WantRunning", "ShieldsUp", "CorpDNS", "RouteAll", "ExitNodeID", "ExitNodeAllowLANAccess")
+        return (
+            self.error,
+            s.get("BackendState"),
+            node_name(me) if me else "",
+            first_ip(me) if me else "",
+            self.current_user(),
+            peers,
+            tuple(p.get(k) for k in keys),
+            (p.get("AutoUpdate") or {}).get("Apply"),
+            self.unattended,
+        )
+
+    @property
+    def backend(self) -> str:
+        return (self.status or {}).get("BackendState", "NoState")
+
+    @property
+    def connected(self) -> bool:
+        return self.backend == "Running"
+
+    def current_user(self) -> str:
+        s = self.status or {}
+        uid = (s.get("Self") or {}).get("UserID")
+        user = (s.get("User") or {}).get(str(uid)) or {}
+        name, login = user.get("DisplayName", ""), user.get("LoginName", "")
+        if name and login and name != login:
+            return f"{name} ({login})"
+        return name or login
+
+    def exit_node(self) -> dict | None:
+        for peer in ((self.status or {}).get("Peer") or {}).values():
+            if peer.get("ExitNode"):
+                return peer
+        return None
+
+    def update_icon(self) -> None:
+        if self.connected and self.exit_node():
+            icon, desc = ICON_EXIT, "Tailscale: connected (exit node)"
+        elif self.connected:
+            icon, desc = ICON_ON, "Tailscale: connected"
+        else:
+            icon, desc = ICON_OFF, "Tailscale: disconnected"
+        self.indicator.set_icon_full(icon, desc)
+
+    # ---------- menu ----------
+
+    def item(self, label: str, callback=None, sensitive: bool = True) -> Gtk.MenuItem:
+        it = Gtk.MenuItem(label=label)
+        it.set_use_underline(False)
+        if callback:
+            it.connect("activate", lambda _w: callback())
+        it.set_sensitive(sensitive and (callback is not None))
+        return it
+
+    def check(self, label: str, active: bool, callback, sensitive: bool = True) -> Gtk.CheckMenuItem:
+        it = Gtk.CheckMenuItem(label=label)
+        it.set_use_underline(False)
+        it.set_active(active)
+        it.set_sensitive(sensitive)
+        it.connect("toggled", lambda w: None if self.updating else callback(w.get_active()))
+        return it
+
+    def build_menu(self) -> Gtk.Menu:
+        self.updating = True
+        m = Gtk.Menu()
+        add = m.append
+        state = self.backend
+
+        # --- status ---
+        if self.error:
+            add(self.item("Tailscale service is not running - click to start", self.start_service))
+        elif state == "Running":
+            add(self.check("Connected", True, lambda _a: self.disconnect()))
+        elif state == "NeedsLogin":
+            add(self.item("Logged out - click to log in…", self.login))
+        elif state == "Starting":
+            add(self.item("Connecting…"))
+        elif state == "NeedsMachineAuth":
+            add(self.item("Waiting for admin approval…", lambda: webbrowser.open(ADMIN_URL)))
+        else:
+            add(self.check("Disconnected - click to connect", False, lambda _a: self.connect()))
+        add(Gtk.SeparatorMenuItem())
+
+        # --- użytkownik ---
+        user = self.current_user()
+        add(self.item(user or "Not logged in", (lambda: webbrowser.open(ADMIN_URL)) if user else None))
+        add(Gtk.SeparatorMenuItem())
+
+        # --- to urządzenie + urządzenia w sieci ---
+        me = (self.status or {}).get("Self") or {}
+        if me:
+            ip = first_ip(me)
+            add(self.item(f"This device: {node_name(me)} ({ip})", lambda ip=ip: copy_to_clipboard(ip)))
+        add(self.devices_menu())
+        add(Gtk.SeparatorMenuItem())
+
+        # --- exit nody ---
+        add(self.exit_nodes_menu())
+        add(Gtk.SeparatorMenuItem())
+
+        # --- ustawienia, about ---
+        add(self.settings_menu())
+        add(self.item("About", self.about))
+        add(Gtk.SeparatorMenuItem())
+        add(self.item("Exit", Gtk.main_quit))
+
+        m.show_all()
+        self.updating = False
+        return m
+
+    def devices_menu(self) -> Gtk.MenuItem:
+        peers = list(((self.status or {}).get("Peer") or {}).values())
+        root = Gtk.MenuItem(label=f"Network devices ({sum(1 for p in peers if p.get('Online'))}/{len(peers)} online)")
+        sub = Gtk.Menu()
+        if not peers:
+            sub.append(self.item("No devices"))
+        for p in sorted(peers, key=lambda n: (not n.get("Online"), node_name(n).lower())):
+            ip = first_ip(p)
+            mark = "●" if p.get("Online") else "○"
+            os_name = f"  [{p['OS']}]" if p.get("OS") else ""
+            sub.append(self.item(f"{mark} {node_name(p)}  {ip}{os_name}", lambda ip=ip: copy_to_clipboard(ip)))
+        sub.append(Gtk.SeparatorMenuItem())
+        sub.append(self.item("Click a device to copy its IP"))
+        root.set_submenu(sub)
+        root.set_sensitive(bool(self.status))
+        return root
+
+    def exit_nodes_menu(self) -> Gtk.MenuItem:
+        peers = [p for p in ((self.status or {}).get("Peer") or {}).values() if p.get("ExitNodeOption")]
+        prefs = self.prefs or {}
+        current_id = prefs.get("ExitNodeID") or ""
+        current = self.exit_node()
+        label = f"Exit node: {node_name(current)}" if current else "Exit nodes"
+        root = Gtk.MenuItem(label=label)
+        sub = Gtk.Menu()
+
+        group: list[Gtk.RadioMenuItem] = []
+
+        def radio(text: str, active: bool, node_id: str, sensitive: bool = True) -> Gtk.RadioMenuItem:
+            it = Gtk.RadioMenuItem.new_with_label(group[0].get_group() if group else None, text)
+            group.append(it)
+            it.set_active(active)
+            it.set_sensitive(sensitive)
+            it.connect("toggled", lambda w: None if self.updating or not w.get_active() else self.set_exit_node(node_id))
+            return it
+
+        sub.append(radio("None", not current_id, ""))
+        for p in sorted(peers, key=lambda n: node_name(n).lower()):
+            online = bool(p.get("Online"))
+            text = f"{node_name(p)}  {first_ip(p)}" + ("" if online else "  (offline)")
+            active = p.get("ID") == current_id
+            sub.append(radio(text, active, p.get("ID", ""), online or active))
+        if not peers:
+            sub.append(self.item("No exit nodes in this tailnet"))
+        sub.append(Gtk.SeparatorMenuItem())
+        sub.append(
+            self.check(
+                "Allow local network access",
+                bool(prefs.get("ExitNodeAllowLANAccess")),
+                lambda v: self.apply(ExitNodeAllowLANAccess=v),
+            )
+        )
+        root.set_submenu(sub)
+        root.set_sensitive(bool(self.prefs))
+        return root
+
+    def settings_menu(self) -> Gtk.MenuItem:
+        p = self.prefs or {}
+        ok = bool(self.prefs)
+        root = Gtk.MenuItem(label="Settings")
+        sub = Gtk.Menu()
+        sub.append(self.check("Allow incoming connections", not p.get("ShieldsUp"), lambda v: self.apply(ShieldsUp=not v), ok))
+        sub.append(self.check("Use Tailscale DNS settings", bool(p.get("CorpDNS")), lambda v: self.apply(CorpDNS=v), ok))
+        sub.append(self.check("Use Tailscale subnets", bool(p.get("RouteAll")), lambda v: self.apply(RouteAll=v), ok))
+        auto = bool((p.get("AutoUpdate") or {}).get("Apply"))
+        if self.auto_update_ok:
+            sub.append(self.check("Automatically install updates", auto, lambda v: self.apply(AutoUpdate={"Apply": v}), ok))
+        else:
+            sub.append(self.check("Automatically install updates (via pacman on Arch)", False, lambda _v: None, False))
+        sub.append(self.check("Run unattended (start with the system)", self.unattended, self.set_unattended))
+        sub.append(Gtk.SeparatorMenuItem())
+        sub.append(self.item("Reset to defaults", self.reset_defaults, ok))
+        root.set_submenu(sub)
+        return root
+
+    # ---------- akcje ----------
+
+    def apply(self, **prefs) -> None:
+        try:
+            set_prefs(**prefs)
+        except LocalAPIError as e:
+            error(f"Could not change the setting:\n{e}")
+        self.signature = None  # przebuduj menu, także po błędzie (cofa odhaczenie)
+        self.refresh()
+
+    def connect(self) -> None:
+        self.apply(WantRunning=True)
+
+    def disconnect(self) -> None:
+        self.apply(WantRunning=False)
+
+    def set_exit_node(self, node_id: str) -> None:
+        if node_id:
+            self.apply(ExitNodeID=node_id)
+        else:
+            self.apply(ExitNodeID="", ExitNodeIP="")
+
+    def set_unattended(self, enabled: bool) -> None:
+        verb = "enable" if enabled else "disable"
+        res = run("pkexec", "systemctl", verb, "tailscaled")
+        if res.returncode != 0 and res.returncode != 126:  # 126 = anulowane okno pkexec
+            error(f"systemctl {verb} tailscaled failed:\n{res.stderr.strip()}")
+        self.unattended = unattended_enabled()
+        self.signature = None
+        self.refresh()
+
+    def start_service(self) -> None:
+        res = run("pkexec", "systemctl", "start", "tailscaled")
+        if res.returncode not in (0, 126):
+            error(f"Could not start tailscaled:\n{res.stderr.strip()}")
+        self.refresh()
+
+    def reset_defaults(self) -> None:
+        answer = run(
+            "kdialog", "--title", APP_NAME, "--yesno",
+            "Reset Tailscale settings to defaults?\n\n"
+            "Allow incoming connections: on\nUse Tailscale DNS: on\nUse Tailscale subnets: off\n"
+            "Exit node: none\nAllow local network access: off",
+        )
+        if answer.returncode == 0:
+            self.apply(**DEFAULT_PREFS)
+
+    def login(self) -> None:
+        if self.login_proc and self.login_proc.poll() is None:
+            return
+        self.login_proc = subprocess.Popen(
+            ["tailscale", "login"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        threading.Thread(target=self._watch_login, args=(self.login_proc,), daemon=True).start()
+
+    def _watch_login(self, proc: subprocess.Popen) -> None:
+        for line in proc.stdout:
+            m = re.search(r"https://\S+", line)
+            if m:
+                GLib.idle_add(webbrowser.open, m.group(0))
+                break
+        proc.wait()
+        GLib.idle_add(self.refresh)
+
+    def about(self) -> None:
+        ver = run("tailscale", "version").stdout.splitlines()
+        tail = (self.status or {}).get("CurrentTailnet") or {}
+        text = (
+            f"{APP_NAME} {APP_VERSION}\n"
+            "A small Tailscale tray client in the style of the Windows app.\n\n"
+            f"Tailscale: {ver[0] if ver else '?'}\n"
+            f"Tailnet: {tail.get('Name', '-')}\n"
+            f"State: {self.backend}"
+        )
+        subprocess.Popen(["kdialog", "--title", f"About {APP_NAME}", "--icon", "tailscale-tray", "--msgbox", text])
+
+
+def single_instance_lock():
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/tailscale-tray-{os.getuid()}"
+    os.makedirs(runtime, exist_ok=True)
+    lock = open(os.path.join(runtime, "tailscale-tray.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return None
+    return lock
+
+
+def main() -> None:
+    lock = single_instance_lock()
+    if lock is None:
+        notify("Tailscale Tray is already running", "The icon is in the system tray.")
+        return
+    GLib.set_prgname("tailscale-tray")
+    TailscaleTray()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+ <!-- Ikona aplikacji Tailscale Tray: siatka kropek z logo Tailscale, styl jak gpu-tray.
+      Poświata z półprzezroczystych kół, bo renderer SVG w Qt/KDE nie obsługuje filtrów. -->
+ <defs>
+  <radialGradient id="bgGlow" cx="0.5" cy="0.55" r="0.7">
+   <stop offset="0" stop-color="#3a1747"/>
+   <stop offset="0.55" stop-color="#150d24"/>
+   <stop offset="1" stop-color="#07070d"/>
+  </radialGradient>
+ </defs>
+ <rect x="2" y="2" width="124" height="124" rx="24" fill="url(#bgGlow)"/>
+ <!-- przygaszone kropki -->
+ <g fill="#2a3563" stroke="#9fb4ff" stroke-opacity="0.45" stroke-width="2">
+  <circle cx="32" cy="32" r="12"/><circle cx="64" cy="32" r="12"/><circle cx="96" cy="32" r="12"/>
+  <circle cx="32" cy="96" r="12"/><circle cx="96" cy="96" r="12"/>
+ </g>
+ <!-- poświata "T" -->
+ <g fill="#b86bff" fill-opacity="0.18">
+  <circle cx="32" cy="64" r="20"/><circle cx="64" cy="64" r="20"/><circle cx="96" cy="64" r="20"/><circle cx="64" cy="96" r="20"/>
+ </g>
+ <g fill="#9fb4ff" fill-opacity="0.35">
+  <circle cx="32" cy="64" r="16"/><circle cx="64" cy="64" r="16"/><circle cx="96" cy="64" r="16"/><circle cx="64" cy="96" r="16"/>
+ </g>
+ <!-- jasne kropki "T" -->
+ <g fill="#ffffff" stroke="#e3e9ff" stroke-width="2">
+  <circle cx="32" cy="64" r="12"/><circle cx="64" cy="64" r="12"/><circle cx="96" cy="64" r="12"/><circle cx="64" cy="96" r="12"/>
+ </g>
+</svg>
