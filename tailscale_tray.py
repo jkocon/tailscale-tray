@@ -38,7 +38,7 @@ SOCKET = "/var/run/tailscale/tailscaled.sock"
 POLL_SECONDS = 3
 ADMIN_URL = "https://login.tailscale.com/admin/machines"
 ICON_DIR = Path(__file__).resolve().with_name("icons")
-ICON_ON, ICON_OFF, ICON_EXIT = "tailscale-tray-on", "tailscale-tray-off", "tailscale-tray-exit"
+ICON_ON, ICON_OFF, ICON_EXIT = "tailscale-tray-on", "tailscale-tray-disconnected", "tailscale-tray-exit"
 
 # Wartości domyślne Tailscale na Linuksie (tailscale up bez flag).
 DEFAULT_PREFS = {

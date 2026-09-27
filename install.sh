@@ -15,6 +15,7 @@ fi
 pacman -S --needed --asdeps --noconfirm python-gobject libayatana-appindicator kdialog wl-clipboard
 
 install -Dm644 -t "$LIB" "$SRC/tailscale_tray.py"
+rm -rf "$LIB/icons"  # bez ikon o starych nazwach
 install -Dm644 -t "$LIB/icons" "$SRC"/icons/*.svg
 install -Dm644 -t /etc/xdg/autostart "$SRC/tailscale-tray.desktop"
 install -Dm644 "$SRC/tailscale-tray-launcher.desktop" /usr/local/share/applications/tailscale-tray.desktop
