@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prosta ikona Tailscale w zasobniku w stylu klienta na Windows (zamiast rozbudowanego KTailctl).
 
-Menu (lewy lub prawy klik): status (klik = połącz/rozłącz), zalogowany użytkownik, to urządzenie,
+Menu (lewy lub prawy klik): status (klik = połącz/rozłącz), konta (przełączanie, dodawanie), to urządzenie,
 lista urządzeń w sieci, exit nody, ustawienia, About, Exit.
 
 Rozmawia z tailscaled przez jego LocalAPI (unix socket). Zmiana ustawień bez roota wymaga,
@@ -85,10 +85,7 @@ def set_prefs(**prefs) -> None:
     """PATCH prefs; każde pole wymaga flagi <Pole>Set, inaczej tailscaled je ignoruje."""
     body = dict(prefs)
     for key in prefs:
-        if key == "AutoUpdate":
-            body["AutoUpdateSet"] = {"ApplySet": True}
-        else:
-            body[f"{key}Set"] = True
+        body[f"{key}Set"] = True
     api("PATCH", "prefs", body)
 
 
@@ -115,17 +112,19 @@ def copy_to_clipboard(text: str) -> None:
     notify("Copied to clipboard", text)
 
 
-def auto_update_supported() -> bool:
-    try:
-        res = run("tailscale", "update", "--dry-run")
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "not supported" not in (res.stdout + res.stderr)
-
-
 def unattended_enabled() -> bool:
     # "Run unattended" na Linuksie = tailscaled startuje z systemem, bez logowania użytkownika.
     return run("systemctl", "is-enabled", "tailscaled").stdout.strip() == "enabled"
+
+
+def profile_label(profile: dict) -> str:
+    user = profile.get("UserProfile") or {}
+    name, login = user.get("DisplayName", ""), user.get("LoginName", "") or profile.get("Name", "")
+    label = f"{name} ({login})" if name and login and name != login else (name or login or profile.get("ID", "?"))
+    tailnet = (profile.get("NetworkProfile") or {}).get("DomainName", "")
+    if tailnet and tailnet != login:
+        label += f"  [{tailnet}]"
+    return label
 
 
 def first_ip(node: dict) -> str:
@@ -142,10 +141,11 @@ def node_name(node: dict) -> str:
 class TailscaleTray:
     def __init__(self) -> None:
         self.status: dict | None = None
+        self.profiles: list[dict] = []
+        self.current_profile = ""
         self.prefs: dict | None = None
         self.error: str = ""
         self.unattended = unattended_enabled()
-        self.auto_update_ok = auto_update_supported()
         self.signature = None
         self.updating = False  # blokuje sygnały 'toggled' przy programowym ustawianiu pozycji
         self.login_proc: subprocess.Popen | None = None
@@ -166,9 +166,12 @@ class TailscaleTray:
         try:
             self.status = api("GET", "status")
             self.prefs = api("GET", "prefs")
+            self.profiles = api("GET", "profiles/") or []
+            self.current_profile = (api("GET", "profiles/current") or {}).get("ID", "")
             self.error = ""
         except LocalAPIError as e:
             self.status, self.prefs, self.error = None, None, str(e)
+            self.profiles, self.current_profile = [], ""
         sig = self.make_signature()
         if sig != self.signature:
             self.signature = sig
@@ -194,7 +197,8 @@ class TailscaleTray:
             self.current_user(),
             peers,
             tuple(p.get(k) for k in keys),
-            (p.get("AutoUpdate") or {}).get("Apply"),
+            tuple((pr.get("ID"), profile_label(pr)) for pr in self.profiles),
+            self.current_profile,
             self.unattended,
         )
 
@@ -269,9 +273,8 @@ class TailscaleTray:
             add(self.check("Disconnected - click to connect", False, lambda _a: self.connect()))
         add(Gtk.SeparatorMenuItem())
 
-        # --- użytkownik ---
-        user = self.current_user()
-        add(self.item(user or "Not logged in", (lambda: webbrowser.open(ADMIN_URL)) if user else None))
+        # --- użytkownik / konta ---
+        add(self.accounts_menu())
         add(Gtk.SeparatorMenuItem())
 
         # --- to urządzenie + urządzenia w sieci ---
@@ -295,6 +298,29 @@ class TailscaleTray:
         m.show_all()
         self.updating = False
         return m
+
+    def accounts_menu(self) -> Gtk.MenuItem:
+        user = self.current_user()
+        root = Gtk.MenuItem(label=user or "Not logged in")
+        root.set_use_underline(False)
+        sub = Gtk.Menu()
+        group: list[Gtk.RadioMenuItem] = []
+        for pr in sorted(self.profiles, key=lambda x: profile_label(x).lower()):
+            pid = pr.get("ID", "")
+            it = Gtk.RadioMenuItem.new_with_label(group[0].get_group() if group else None, profile_label(pr))
+            it.set_use_underline(False)
+            group.append(it)
+            it.set_active(pid == self.current_profile)
+            it.connect("toggled", lambda w, pid=pid: None if self.updating or not w.get_active() else self.switch_account(pid))
+            sub.append(it)
+        if self.profiles:
+            sub.append(Gtk.SeparatorMenuItem())
+        sub.append(self.item("Add another account…", self.login, not self.error))
+        sub.append(self.item("Admin console", lambda: webbrowser.open(ADMIN_URL), bool(user)))
+        sub.append(Gtk.SeparatorMenuItem())
+        sub.append(self.item("Log out", self.logout, bool(user)))
+        root.set_submenu(sub)
+        return root
 
     def devices_menu(self) -> Gtk.MenuItem:
         peers = list(((self.status or {}).get("Peer") or {}).values())
@@ -360,11 +386,6 @@ class TailscaleTray:
         sub.append(self.check("Allow incoming connections", not p.get("ShieldsUp"), lambda v: self.apply(ShieldsUp=not v), ok))
         sub.append(self.check("Use Tailscale DNS settings", bool(p.get("CorpDNS")), lambda v: self.apply(CorpDNS=v), ok))
         sub.append(self.check("Use Tailscale subnets", bool(p.get("RouteAll")), lambda v: self.apply(RouteAll=v), ok))
-        auto = bool((p.get("AutoUpdate") or {}).get("Apply"))
-        if self.auto_update_ok:
-            sub.append(self.check("Automatically install updates", auto, lambda v: self.apply(AutoUpdate={"Apply": v}), ok))
-        else:
-            sub.append(self.check("Automatically install updates (via pacman on Arch)", False, lambda _v: None, False))
         sub.append(self.check("Run unattended (start with the system)", self.unattended, self.set_unattended))
         sub.append(Gtk.SeparatorMenuItem())
         sub.append(self.item("Reset to defaults", self.reset_defaults, ok))
@@ -417,6 +438,25 @@ class TailscaleTray:
         )
         if answer.returncode == 0:
             self.apply(**DEFAULT_PREFS)
+
+    def switch_account(self, profile_id: str) -> None:
+        res = run("tailscale", "switch", profile_id)
+        if res.returncode != 0:
+            error(f"Could not switch account:\n{(res.stderr or res.stdout).strip()}")
+        self.signature = None
+        self.refresh()
+
+    def logout(self) -> None:
+        user = self.current_user()
+        answer = run("kdialog", "--title", APP_NAME, "--yesno",
+                     f"Log out {user}?\n\nThis device will leave the tailnet until you log in again.")
+        if answer.returncode != 0:
+            return
+        res = run("tailscale", "logout")
+        if res.returncode != 0:
+            error(f"Could not log out:\n{(res.stderr or res.stdout).strip()}")
+        self.signature = None
+        self.refresh()
 
     def login(self) -> None:
         if self.login_proc and self.login_proc.poll() is None:

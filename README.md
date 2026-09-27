@@ -4,12 +4,12 @@ Prosta ikona Tailscale w zasobniku w stylu klienta na Windows, lżejsza niż KTa
 Menu otwiera się lewym lub prawym kliknięciem:
 
 - status: klik łączy albo rozłącza (po wylogowaniu otwiera logowanie w przeglądarce),
-- zalogowany użytkownik (klik otwiera panel admina),
+- konta: lista kont Tailscale do przełączania (`tailscale switch`), „Add another account…”
+  (`tailscale login` w przeglądarce), „Admin console” i „Log out”,
 - to urządzenie oraz lista urządzeń w sieci (klik kopiuje IP),
 - exit nody do wyboru i „Allow local network access”,
 - Settings: Allow incoming connections (shields up), Use Tailscale DNS settings (accept-dns),
-  Use Tailscale subnets (accept-routes), Automatically install updates (na Arch wyszarzone, bo
-  Tailscale aktualizuje się przez pacman), Run unattended (tailscaled startuje z systemem,
+  Use Tailscale subnets (accept-routes), Run unattended (tailscaled startuje z systemem,
   przełączane przez pkexec) i Reset to defaults,
 - About, Exit.
 
