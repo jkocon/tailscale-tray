@@ -12,6 +12,7 @@ AppIndicator zamiast QSystemTrayIcon, bo w Plasmie tylko wtedy lewy klik otwiera
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -38,10 +39,29 @@ SOCKET = "/var/run/tailscale/tailscaled.sock"
 POLL_SECONDS = 3
 ADMIN_URL = "https://login.tailscale.com/admin/machines"
 ICON_DIR = Path(__file__).resolve().with_name("icons")
-# Pełne ścieżki, nie nazwy: Plasma ignoruje IconThemePath z płaskim katalogiem i obcina nieznaną
-# nazwę do "tailscale-tray" (ikona aplikacji), więc każdy stan wyglądał tak samo.
+
+
+def icon_path(name: str) -> str:
+    """Pełna ścieżka do kopii ikony z hashem zawartości w nazwie.
+
+    Pełna ścieżka, nie nazwa: Plasma ignoruje IconThemePath z płaskim katalogiem i obcina nieznaną
+    nazwę do "tailscale-tray" (ikona aplikacji). Hash w nazwie: Plasma trzyma w cache ikonę spod
+    tej samej ścieżki, więc po zmianie pliku pokazywała starą wersję."""
+    src = ICON_DIR / f"{name}.svg"
+    try:
+        data = src.read_bytes()
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/tailscale-tray-{os.getuid()}") / "tailscale-tray"
+        runtime.mkdir(parents=True, exist_ok=True)
+        dst = runtime / f"{name}-{hashlib.sha1(data).hexdigest()[:10]}.svg"
+        if not dst.exists():
+            dst.write_bytes(data)
+        return str(dst)
+    except OSError:
+        return str(src)
+
+
 ICON_ON, ICON_OFF, ICON_EXIT = (
-    str(ICON_DIR / f"{name}.svg") for name in ("tailscale-tray-on", "tailscale-tray-disconnected", "tailscale-tray-exit")
+    icon_path(name) for name in ("tailscale-tray-on", "tailscale-tray-disconnected", "tailscale-tray-exit")
 )
 
 # Wartości domyślne Tailscale na Linuksie (tailscale up bez flag).
