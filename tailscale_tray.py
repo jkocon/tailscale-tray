@@ -38,7 +38,11 @@ SOCKET = "/var/run/tailscale/tailscaled.sock"
 POLL_SECONDS = 3
 ADMIN_URL = "https://login.tailscale.com/admin/machines"
 ICON_DIR = Path(__file__).resolve().with_name("icons")
-ICON_ON, ICON_OFF, ICON_EXIT = "tailscale-tray-on", "tailscale-tray-disconnected", "tailscale-tray-exit"
+# Pełne ścieżki, nie nazwy: Plasma ignoruje IconThemePath z płaskim katalogiem i obcina nieznaną
+# nazwę do "tailscale-tray" (ikona aplikacji), więc każdy stan wyglądał tak samo.
+ICON_ON, ICON_OFF, ICON_EXIT = (
+    str(ICON_DIR / f"{name}.svg") for name in ("tailscale-tray-on", "tailscale-tray-disconnected", "tailscale-tray-exit")
+)
 
 # Wartości domyślne Tailscale na Linuksie (tailscale up bez flag).
 DEFAULT_PREFS = {
@@ -176,8 +180,6 @@ class TailscaleTray:
         self.indicator = AppIndicator3.Indicator.new(
             "tailscale-tray", ICON_OFF, AppIndicator3.IndicatorCategory.SYSTEM_SERVICES
         )
-        if ICON_DIR.is_dir():
-            self.indicator.set_icon_theme_path(str(ICON_DIR))
         self.indicator.set_title("Tailscale")
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.refresh()
