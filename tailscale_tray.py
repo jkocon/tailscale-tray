@@ -89,8 +89,22 @@ def set_prefs(**prefs) -> None:
     api("PATCH", "prefs", body)
 
 
-def run(*cmd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+def run(*cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+ACCESS_DENIED = re.compile(r"access denied|permission denied|must be root|operator", re.IGNORECASE)
+USER = os.environ.get("USER") or os.getlogin()
+
+
+def tailscale_admin(*args: str) -> subprocess.CompletedProcess:
+    """Polecenie tailscale jako użytkownik; przy braku uprawnień (profil bez operatora) przez pkexec,
+    od razu przywracając operatora w profilu, który jest aktywny po poleceniu."""
+    res = run("tailscale", *args)
+    if res.returncode == 0 or not ACCESS_DENIED.search(res.stdout + res.stderr):
+        return res
+    script = 'tailscale "$@" && tailscale set --operator="$OPERATOR"'
+    return run("pkexec", "env", f"OPERATOR={USER}", "sh", "-c", script, "sh", *args, timeout=120)
 
 
 def notify(title: str, body: str = "") -> None:
@@ -166,11 +180,15 @@ class TailscaleTray:
         try:
             self.status = api("GET", "status")
             self.prefs = api("GET", "prefs")
-            self.profiles = api("GET", "profiles/") or []
-            self.current_profile = (api("GET", "profiles/current") or {}).get("ID", "")
             self.error = ""
         except LocalAPIError as e:
             self.status, self.prefs, self.error = None, None, str(e)
+        try:
+            # Osobno: bez operatora w bieżącym profilu tailscaled może odmówić listy kont,
+            # a reszta menu (i przełączenie z powrotem) ma nadal działać.
+            self.profiles = api("GET", "profiles/") or []
+            self.current_profile = (api("GET", "profiles/current") or {}).get("ID", "")
+        except LocalAPIError:
             self.profiles, self.current_profile = [], ""
         sig = self.make_signature()
         if sig != self.signature:
@@ -440,9 +458,10 @@ class TailscaleTray:
             self.apply(**DEFAULT_PREFS)
 
     def switch_account(self, profile_id: str) -> None:
-        res = run("tailscale", "switch", profile_id)
+        res = tailscale_admin("switch", profile_id)
         if res.returncode != 0:
-            error(f"Could not switch account:\n{(res.stderr or res.stdout).strip()}")
+            if res.returncode != 126:  # 126 = anulowane okno pkexec
+                error(f"Could not switch account:\n{(res.stderr or res.stdout).strip()}")
         self.signature = None
         self.refresh()
 
@@ -452,8 +471,8 @@ class TailscaleTray:
                      f"Log out {user}?\n\nThis device will leave the tailnet until you log in again.")
         if answer.returncode != 0:
             return
-        res = run("tailscale", "logout")
-        if res.returncode != 0:
+        res = tailscale_admin("logout")
+        if res.returncode not in (0, 126):
             error(f"Could not log out:\n{(res.stderr or res.stdout).strip()}")
         self.signature = None
         self.refresh()
@@ -461,19 +480,31 @@ class TailscaleTray:
     def login(self) -> None:
         if self.login_proc and self.login_proc.poll() is None:
             return
+        # Nowe konto = nowy profil z domyślnymi ustawieniami, BEZ operatora. Zwykły użytkownik
+        # traciłby w nim uprawnienia w połowie logowania (tak się stało 2026-09-28), więc logowanie
+        # idzie przez pkexec z --operator, żeby nowy profil od razu był sterowalny z traya.
         self.login_proc = subprocess.Popen(
-            ["tailscale", "login"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            ["pkexec", "tailscale", "login", f"--operator={USER}", "--timeout=10m"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         threading.Thread(target=self._watch_login, args=(self.login_proc,), daemon=True).start()
 
     def _watch_login(self, proc: subprocess.Popen) -> None:
+        output = []
         for line in proc.stdout:
-            m = re.search(r"https://\S+", line)
+            output.append(line)
+            m = re.search(r"https://login\S+", line)
             if m:
                 GLib.idle_add(webbrowser.open, m.group(0))
-                break
         proc.wait()
-        GLib.idle_add(self.refresh)
+        if proc.returncode not in (0, 126):
+            GLib.idle_add(error, "Login failed:\n" + "".join(output[-10:]).strip())
+        GLib.idle_add(self.force_refresh)
+
+    def force_refresh(self) -> bool:
+        self.signature = None
+        self.refresh()
+        return False
 
     def about(self) -> None:
         ver = run("tailscale", "version").stdout.splitlines()
