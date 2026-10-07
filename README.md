@@ -5,7 +5,7 @@ Menu otwiera się lewym lub prawym kliknięciem:
 
 - status: klik łączy albo rozłącza (po wylogowaniu otwiera logowanie w przeglądarce),
 - konta: lista kont Tailscale do przełączania (`tailscale switch`), „Add another account…”
-  (`tailscale login` w przeglądarce), „Admin console” i „Log out”,
+  (`tailscale login` w przeglądarce), „Admin console”, „Manage subnet routes…” (panel z filtrem maszyn z trasami – zatwierdzanie tras celowo tylko w przeglądarce, bez kluczy API na laptopie) i „Log out”,
 - to urządzenie oraz lista urządzeń w sieci (klik kopiuje IP),
 - exit nody do wyboru i „Allow local network access”,
 - Settings: Allow incoming connections (shields up), Use Tailscale DNS settings (accept-dns),

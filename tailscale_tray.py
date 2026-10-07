@@ -38,6 +38,7 @@ APP_VERSION = "1.0"
 SOCKET = "/var/run/tailscale/tailscaled.sock"
 POLL_SECONDS = 3
 ADMIN_URL = "https://login.tailscale.com/admin/machines"
+ROUTES_URL = ADMIN_URL + "?q=property%3Asubnet"  # filtr maszyn ogłaszających trasy
 ICON_DIR = Path(__file__).resolve().with_name("icons")
 
 
@@ -366,6 +367,8 @@ class TailscaleTray:
             sub.append(Gtk.SeparatorMenuItem())
         sub.append(self.item("Add another account…", self.login, not self.error))
         sub.append(self.item("Admin console", lambda: webbrowser.open(ADMIN_URL), bool(user)))
+        # Zatwierdzanie tras to uprawnienie admina (API z kluczem) - celowo tylko link do panelu, bez kluczy na laptopie.
+        sub.append(self.item("Manage subnet routes…", lambda: webbrowser.open(ROUTES_URL), bool(user)))
         sub.append(Gtk.SeparatorMenuItem())
         sub.append(self.item("Log out", self.logout, bool(user)))
         root.set_submenu(sub)
