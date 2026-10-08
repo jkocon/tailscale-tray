@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Instaluje/aktualizuje tailscale-tray w systemie. Uruchom jako root (sudo -A ./install.sh).
-# Na X13 robi to automatycznie target/apply.sh po każdej zmianie w katalogu tailscale-tray/.
+# Na X13 robi to automatycznie target/apply.sh po każdej zmianie w tailscale-tray/ albo tray-common/.
+# Działający tray podmienia się dopiero po ponownym zalogowaniu (albo: pkill -x tailscale-tray; /usr/local/lib/tailscale-tray/tailscale-tray &).
 # Kod wyjścia 10 = brak Tailscale, nic nie zainstalowano.
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -12,9 +13,13 @@ if ! command -v tailscale >/dev/null; then
     exit 10
 fi
 
-pacman -S --needed --asdeps --noconfirm python-gobject libayatana-appindicator kdialog wl-clipboard
+pacman -S --needed --asdeps --noconfirm kdialog wl-clipboard libnotify xdg-utils
 
-install -Dm644 -t "$LIB" "$SRC/tailscale_tray.py"
+# Binarka w Rust (od 2.0; wcześniej tailscale_tray.py z GTK/AppIndicator), budowana jako zwykły użytkownik.
+BIN=$("$SRC/../tray-common/build.sh" "$SRC")
+
+install -Dm755 "$BIN" "$LIB/tailscale-tray"
+rm -rf "$LIB/tailscale_tray.py" "$LIB/__pycache__"  # wersja w Pythonie
 rm -rf "$LIB/icons"  # bez ikon o starych nazwach
 install -Dm644 -t "$LIB/icons" "$SRC"/icons/*.svg
 install -Dm644 -t /etc/xdg/autostart "$SRC/tailscale-tray.desktop"

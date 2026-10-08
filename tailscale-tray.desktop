@@ -2,7 +2,7 @@
 Type=Application
 Name=Tailscale Tray
 Comment=Tailscale status and settings in the system tray
-Exec=/usr/bin/python3 /usr/local/lib/tailscale-tray/tailscale_tray.py
+Exec=/usr/local/lib/tailscale-tray/tailscale-tray
 Icon=tailscale-tray
 Terminal=false
 NoDisplay=true
