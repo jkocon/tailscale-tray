@@ -6,6 +6,7 @@
 //! Rozmawia z tailscaled przez jego LocalAPI (unix socket). Zmiana ustawień bez roota wymaga,
 //! żeby użytkownik był operatorem Tailscale: sudo tailscale set --operator=$USER (robi to install.sh).
 
+mod common;
 mod localapi;
 
 use std::sync::OnceLock;
@@ -14,9 +15,9 @@ use std::time::Duration;
 use ksni::blocking::Handle;
 use regex::Regex;
 use serde_json::{json, Map, Value};
-use tray_common::json::{arr, b, get, s, values};
-use tray_common::menu::{button, check, radio, sep, submenu, text, Menu};
-use tray_common::{bg, icon_path, open_url, refresh_now, run, App, Out, Poller, POLLER};
+use crate::common::json::{arr, b, get, s, values};
+use crate::common::menu::{button, check, radio, sep, submenu, text, Menu};
+use crate::common::{bg, icon_path, open_url, refresh_now, run, App, Out, Poller, POLLER};
 
 use localapi::api;
 
@@ -83,7 +84,7 @@ fn tailscale_admin(args: &[&str]) -> Out {
 
 /// "Run unattended" na Linuksie = tailscaled startuje z systemem, bez logowania użytkownika.
 fn unattended_enabled() -> bool {
-    tray_common::unit_enabled("tailscaled")
+    crate::common::unit_enabled("tailscaled")
 }
 
 fn profile_label(profile: &Value) -> String {
@@ -463,7 +464,7 @@ fn login() {
     let operator = format!("--operator={}", user_name());
     let url = Regex::new(r"https://login\S+").unwrap();
     let mut opened = false;
-    let (code, lines) = tray_common::cmd::stream_lines(
+    let (code, lines) = crate::common::cmd::stream_lines(
         &["pkexec", "tailscale", "login", &operator, "--timeout=10m"],
         |line| {
             if let (false, Some(m)) = (opened, url.find(line)) {
@@ -515,7 +516,7 @@ fn main() {
         return;
     }
     let dump = std::env::args().nth(1).as_deref() == Some("--dump");
-    let _lock = match tray_common::single_instance_lock(APP.id, "tailscale-tray.lock") {
+    let _lock = match crate::common::single_instance_lock(APP.id, "tailscale-tray.lock") {
         _ if dump => None,
         Ok(Some(file)) => Some(file),
         Ok(None) => {
@@ -545,10 +546,10 @@ fn main() {
     if dump {
         let (status, prefs, error, profiles, current) = gather();
         (tray.status, tray.prefs, tray.error, tray.profiles, tray.current_profile) = (status, prefs, error, profiles, current);
-        println!("icon: {}\n{}", ksni::Tray::tool_tip(&tray).title, tray_common::menu::dump(&ksni::Tray::menu(&tray)));
+        println!("icon: {}\n{}", ksni::Tray::tool_tip(&tray).title, crate::common::menu::dump(&ksni::Tray::menu(&tray)));
         return;
     }
-    match tray_common::spawn_tray(tray) {
+    match crate::common::spawn_tray(tray) {
         Ok(handle) => {
             let _ = HANDLE.set(handle);
         }
@@ -558,7 +559,7 @@ fn main() {
         }
     }
     let _ = POLLER.set(Poller::start(POLL, poll));
-    tray_common::park_forever();
+    crate::common::park_forever();
 }
 
 #[cfg(test)]

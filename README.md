@@ -20,9 +20,11 @@ Rozmawia z tailscaled przez LocalAPI (`/var/run/tailscale/tailscaled.sock`). Zmi
 roota wymaga operatora Tailscale, więc `install.sh` ustawia `tailscale set --operator=<użytkownik 1000>`.
 
 Kod: Rust (`src/`, od wersji 2.0 zamiast `tailscale_tray.py` z GTK/AppIndicator). Ikona i menu przez `ksni`
-(StatusNotifierItem + DBusMenu, bez GTK; lewy klik otwiera menu), wspólne części w `../tray-common/`.
-`install.sh` buduje binarkę jako zwykły użytkownik (`tray-common/build.sh`, cargo z pakietu `rust`).
+(StatusNotifierItem + DBusMenu, bez GTK; lewy klik otwiera menu). `src/common/` to część wspólna z
+[tailscale-tray](https://github.com/jkocon/tailscale-tray), [twingate-tray](https://github.com/jkocon/twingate-tray)
+i [netbird-tray](https://github.com/jkocon/netbird-tray) - ta sama kopia w każdym repo.
+`install.sh` buduje binarkę jako zwykły użytkownik (`build.sh`, cargo z pakietu `rust`).
 Podgląd bez ikony: `cargo run -- --dump` wypisuje menu dla bieżącego stanu demona; testy: `cargo test`.
 
 Instalacja: `sudo -A ./install.sh` (do `/usr/local/lib/tailscale-tray`, autostart w `/etc/xdg/autostart`).
-Na X13 robi to automatycznie `target/apply.sh`.
+Na komputerach synchronizowanych przez cachyos_sync robi to automatycznie `target/apply.sh` po każdym nowym commicie.
