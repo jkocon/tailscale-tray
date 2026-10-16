@@ -1,5 +1,9 @@
 # tailscale-tray
 
+> **Archived (2026-10-16): tailscale-tray lives on in [vpn-tray](https://github.com/jkocon/vpn-tray)** –
+> one tray icon for Tailscale, Twingate, NetBird and WireGuard (one VPN at a time). For only this VPN
+> run `vpn-tray --only tailscale`.
+
 A small **Tailscale** icon for the Linux system tray, modelled on the official Windows client and
 much lighter than a full GUI such as KTailctl. Connect, switch accounts, pick an exit node or copy
 a device's IP straight from the tray menu.

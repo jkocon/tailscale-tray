@@ -1,5 +1,9 @@
 # tailscale-tray
 
+> **Zarchiwizowane (2026-10-16): tailscale-tray jest teraz częścią [vpn-tray](https://github.com/jkocon/vpn-tray)** –
+> jedna ikona dla Tailscale, Twingate, NetBird i WireGuard (zawsze jeden VPN). Tylko ten VPN:
+> `vpn-tray --only tailscale`.
+
 > **English documentation:** [README.md](README.md)
 
 Prosta ikona Tailscale w zasobniku w stylu klienta na Windows, lżejsza niż KTailctl.
